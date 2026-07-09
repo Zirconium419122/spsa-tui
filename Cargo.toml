@@ -1,0 +1,13 @@
+[package]
+name = "spsa-tui"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+chessframe = { git = "https://github.com/Zirconium419122/chessframe.git", features = ["bmi2"] }
+rand = "0.10.2"
+
+ratatui = "0.30.2"
+
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
