@@ -13,7 +13,9 @@ fn gain_sequences(k: usize, total_iterations: usize, param: &Param) -> (f64, f64
     let c_k = param.c_end * (total_iterations as f64).powf(GAMMA) / (k as f64).powf(GAMMA);
 
     let a_end = param.r_end * param.c_end.powi(2);
-    let a_k = a_end * (a_stab + total_iterations as f64).powf(ALPHA) / (a_stab + k as f64).powf(ALPHA) / c_k.powi(2);
+    let a_k = a_end * (a_stab + total_iterations as f64).powf(ALPHA)
+        / (a_stab + k as f64).powf(ALPHA)
+        / c_k.powi(2);
 
     (a_k, c_k)
 }
@@ -45,8 +47,14 @@ pub fn perturb(
         let plus_value = (p.value + c_k * delta).clamp(p.min, p.max);
         let minus_value = (p.value - c_k * delta).clamp(p.min, p.max);
 
-        plus_options.insert(name.clone(), (plus_value + rng.random::<f64>()).floor() as isize);
-        minus_options.insert(name.clone(), (minus_value + rng.random::<f64>()).floor() as isize);
+        plus_options.insert(
+            name.clone(),
+            (plus_value + rng.random::<f64>()).floor() as isize,
+        );
+        minus_options.insert(
+            name.clone(),
+            (minus_value + rng.random::<f64>()).floor() as isize,
+        );
 
         deltas.insert(name.clone(), Perturbation { delta, c_k, a_k });
     }

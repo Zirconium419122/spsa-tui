@@ -1,5 +1,6 @@
 use std::{collections::HashMap, io::Error, process::Command};
 
+#[derive(Clone)]
 pub struct MatchConfig {
     pub engine: String,
     pub tc: String,
@@ -31,6 +32,7 @@ pub fn run_match(
         cmd.arg(format!("option.{}={}", name, value));
     }
 
+    #[rustfmt::skip]
     cmd.args([
         "-each", &format!("tc={}", config.tc),
         "-rounds", &(config.games / 2).to_string(),
