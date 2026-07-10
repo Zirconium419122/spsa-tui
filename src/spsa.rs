@@ -1,4 +1,4 @@
-use std::{error::Error, sync::mpsc::Sender};
+use std::{error::Error, sync::{Arc, atomic::AtomicBool, mpsc::Sender}};
 
 use crate::{
     fastchess::{MatchConfig, run_match},
@@ -22,6 +22,7 @@ pub enum SpsaEvent {
         params: ParamSet,
         k: usize,
         wins: usize,
+        draws: usize,
         losses: usize,
     },
     Error(Box<dyn Error>),
@@ -37,10 +38,11 @@ pub struct Spsa {
     match_config: MatchConfig,
     k: usize,
     tx: Sender<SpsaEvent>,
+    running: Arc<AtomicBool>,
 }
 
 impl Iterator for Spsa {
-    type Item = Result<(), Box<dyn Error>>;
+    type Item = ();
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.is_done() {
@@ -50,9 +52,12 @@ impl Iterator for Spsa {
         let (deltas, plus_options, minus_options) =
             perturb(&self.params, self.k, self.total_iterations);
 
-        let (wins, losses) = match run_match(&self.match_config, &plus_options, &minus_options) {
+        let (wins, draws, losses) = match run_match(&self.match_config, &plus_options, &minus_options, self.running.clone()) {
             Ok(v) => v,
-            Err(e) => return Some(Err(e.into())),
+            Err(e) => {
+                let _ = self.send(SpsaEvent::Error(e));
+                return Some(());
+            }
         };
 
         update(&mut self.params, &deltas, wins, losses);
@@ -61,24 +66,22 @@ impl Iterator for Spsa {
             save_checkpoint(&self.params, self.k).unwrap();
         }
 
-        match self.send(SpsaEvent::Iteration {
+        let _ = self.send(SpsaEvent::Iteration {
             params: self.params.clone(),
             k: self.k,
             wins: wins as usize,
+            draws: draws as usize,
             losses: losses as usize,
-        }) {
-            Ok(()) => {}
-            Err(e) => return Some(Err(e.into())),
-        }
+        });
 
         self.k += 1;
 
-        Some(Ok(()))
+        Some(())
     }
 }
 
 impl Spsa {
-    pub fn new(config: SpsaConfig, tx: Sender<SpsaEvent>) -> Spsa {
+    pub fn new(config: SpsaConfig, tx: Sender<SpsaEvent>, running: Arc<AtomicBool>) -> Spsa {
         let match_config = MatchConfig {
             engine: config.engine,
             tc: config.tc,
@@ -94,6 +97,7 @@ impl Spsa {
             match_config,
             k: 1,
             tx,
+            running,
         }
     }
 

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 chessframe = { git = "https://github.com/Zirconium419122/chessframe.git", features = ["bmi2"] }
+libc = "0.2.186"
 rand = "0.10.2"
 
 ratatui = "0.30.2"

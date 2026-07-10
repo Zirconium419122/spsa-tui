@@ -2,11 +2,12 @@ use std::{
     collections::HashMap,
     error::Error,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::Receiver,
     },
-    thread,
+    thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use ratatui::{
@@ -35,12 +36,15 @@ pub struct App {
     param_hist: HashMap<String, Vec<f64>>,
     k: usize,
     wins: usize,
+    draws: usize,
     losses: usize,
 
-    spsa: Option<Spsa>,
+    spsa: Option<Arc<Mutex<Spsa>>>,
+    spsa_handle: Option<JoinHandle<()>>,
     rx: Option<Receiver<SpsaEvent>>,
 
-    done: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    paused: bool,
     exit: bool,
 }
 
@@ -50,7 +54,7 @@ impl Widget for &App {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
             .areas(area);
-        let title = Line::from("SPSA tuner").centered();
+        let title = Line::from(" SPSA tuner ").centered();
 
         let data: Vec<(String, Vec<(f64, f64)>)> = self
             .param_hist
@@ -90,16 +94,18 @@ impl Widget for &App {
             .flat_map(|(_, x)| x)
             .map(|(_, x)| *x)
             .min_by(|a, b| a.total_cmp(b))
-            .unwrap_or(0.0);
+            .unwrap_or(0.0)
+            - 5.0;
         let max = data
             .iter()
             .flat_map(|(_, x)| x)
             .map(|(_, x)| *x)
             .max_by(|a, b| a.total_cmp(b))
-            .unwrap_or(1.0);
+            .unwrap_or(0.0)
+            + 5.0;
 
-        let min_str = format!("{:.3}", min);
-        let max_str = format!("{:.3}", max);
+        let min_str = format!("{:.2}", min);
+        let max_str = format!("{:.2}", max);
         let y_axis = Axis::default()
             .title("Values")
             .bounds([min, max])
@@ -108,11 +114,31 @@ impl Widget for &App {
         Chart::new(datasets)
             .x_axis(x_axis)
             .y_axis(y_axis)
+            .legend_position(None)
             .render(left, buf);
 
         let block = Block::bordered().title(title).border_set(border::THICK);
 
-        let info = format!("Iteration {}:", self.k);
+        let params_str = self
+            .param_hist
+            .iter()
+            .map(|(name, vals)| {
+                let val = vals.last().unwrap_or(&0.0);
+                format!("{}: {:.3}", name, val)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let total = self.wins + self.losses;
+        let score = if total > 0 {
+            format!("{:.2}%", self.wins as f64 / total as f64 * 100.0)
+        } else {
+            "-".into()
+        };
+        let info = format!(
+            "Iteration {}:\n\nWins:   {}\nDraws:  {}\nLosses: {}\nScore:  {}\n\n{}",
+            self.k, self.wins, self.draws, self.losses, score, params_str
+        );
         Paragraph::new(info)
             .left_aligned()
             .block(block)
@@ -133,13 +159,16 @@ impl App {
 
             param_hist: HashMap::new(),
             k: 1,
-            losses: 0,
             wins: 0,
+            draws: 0,
+            losses: 0,
 
             spsa: None,
+            spsa_handle: None,
             rx: None,
 
-            done: Arc::new(AtomicBool::new(false)),
+            running: Arc::new(AtomicBool::new(false)),
+            paused: false,
             exit: false,
         }
     }
@@ -157,15 +186,15 @@ impl App {
                         params,
                         k,
                         wins,
+                        draws,
                         losses,
                     } => {
                         for p in params {
-                            if let Some(val) = self.param_hist.get_mut(&p.0) {
-                                val.push(p.1.value);
-                            };
+                            self.param_hist.entry(p.0).or_default().push(p.1.value);
                         }
                         self.k = k;
                         self.wins = wins;
+                        self.draws = draws;
                         self.losses = losses;
                     }
                     SpsaEvent::Error(e) => return Err(e),
@@ -173,19 +202,20 @@ impl App {
             }
 
             if !self.exit
-                && !self.done.load(Ordering::Relaxed)
+                && !self.paused
+                && !self.running.load(Ordering::Relaxed)
                 && let Some(spsa) = &self.spsa
             {
-                let mut spsa = spsa.clone();
-                let done = self.done.clone();
+                self.running.store(true, Ordering::Relaxed);
 
-                thread::spawn(move || match spsa.next() {
-                    Some(Ok(())) => {}
-                    Some(Err(e)) => {
-                        let _ = spsa.send(SpsaEvent::Error(e));
+                let spsa = spsa.clone();
+                let running = self.running.clone();
+
+                self.spsa_handle = Some(thread::spawn(move || {
+                    if spsa.lock().unwrap().next().is_some() {
+                        running.store(false, Ordering::Relaxed)
                     }
-                    None => done.store(true, Ordering::Relaxed),
-                });
+                }));
             }
 
             if self.exit {
@@ -214,6 +244,7 @@ impl App {
     fn handle_key_event(&mut self, key_event: event::KeyEvent) {
         match key_event.code {
             KeyCode::Char('q') => self.exit(),
+            KeyCode::Char(' ') => self.paused = !self.paused,
             KeyCode::Enter => {
                 let params = match build_param_set(&self.engine) {
                     Ok(v) => v,
@@ -221,9 +252,10 @@ impl App {
                 };
 
                 for p in &params {
-                    if let Some(val) = self.param_hist.get_mut(p.0) {
-                        val.push(p.1.value);
-                    };
+                    self.param_hist
+                        .entry(p.0.clone())
+                        .or_default()
+                        .push(p.1.value);
                 }
 
                 let config = SpsaConfig {
@@ -239,13 +271,22 @@ impl App {
 
                 let (tx, rx) = std::sync::mpsc::channel::<SpsaEvent>();
                 self.rx = Some(rx);
-                self.spsa = Some(Spsa::new(config, tx));
+                self.spsa = Some(Arc::new(Mutex::new(Spsa::new(
+                    config,
+                    tx,
+                    self.running.clone(),
+                ))));
             }
             _ => {}
         }
     }
 
     fn exit(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
         self.exit = true;
+
+        if let Some(spsa_handle) = self.spsa_handle.take() {
+            let _ = spsa_handle.join();
+        }
     }
 }

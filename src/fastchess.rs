@@ -1,4 +1,12 @@
-use std::{collections::HashMap, io::Error, process::Command};
+use std::{
+    collections::HashMap, error::Error, process::{Command, Stdio}, sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    }, thread, time::Duration
+};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 #[derive(Clone)]
 pub struct MatchConfig {
@@ -13,7 +21,8 @@ pub fn run_match(
     config: &MatchConfig,
     plus_options: &HashMap<String, isize>,
     minus_options: &HashMap<String, isize>,
-) -> Result<(isize, isize), Error> {
+    running: Arc<AtomicBool>,
+) -> Result<(isize, isize, isize), Box<dyn Error>> {
     let mut cmd = Command::new("fastchess");
 
     cmd.arg("-engine")
@@ -44,25 +53,53 @@ pub fn run_match(
         "-ratinginterval", "0",
     ]);
 
-    let output = cmd.output()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
 
-    parse_score(&stdout)
+    #[cfg(unix)]
+    let mut child = child.process_group(0).spawn()?;
+
+    #[cfg(not(unix))]
+    let mut child = child.spawn()?;
+
+    loop {
+        if !running.load(Ordering::Relaxed) {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+
+            child.kill()?;
+            child.wait()?;
+            return Err("cancelled".into());
+        }
+
+        match child.try_wait()? {
+            Some(_) => break,
+            None => thread::sleep(Duration::from_millis(50)),
+        }
+    }
+
+    let output = child.wait_with_output()?;
+
+    parse_score(&String::from_utf8_lossy(&output.stdout))
 }
 
-fn parse_score(output: &str) -> Result<(isize, isize), Error> {
+fn parse_score(output: &str) -> Result<(isize, isize, isize), Box<dyn Error>> {
     output
         .lines()
         .find(|line| line.starts_with("Results of"))
-        .expect(&format!(
-            "Could not find results header in fastchess output:\n{}",
-            output
-        ));
+        .ok_or::<Box<dyn Error>>(
+            format!(
+                "Could not find results header in fastchess output:\n{}",
+                output
+            )
+            .into(),
+        )?;
 
     let stats_line = output
         .lines()
         .find(|line| line.starts_with("Games:"))
-        .expect("Could not find stats line in fastchess output.");
+        .ok_or::<Box<dyn Error>>("Could not find stats line in fastchess output.".into())?;
 
     let mut wins: Option<isize> = None;
     let mut draws: Option<isize> = None;
@@ -80,10 +117,10 @@ fn parse_score(output: &str) -> Result<(isize, isize), Error> {
     }
 
     let wins = wins.expect("Missing 'Wins' in stats line.");
-    let _draws = draws.expect("Missing 'Draws' in stats line.");
+    let draws = draws.expect("Missing 'Draws' in stats line.");
     let losses = losses.expect("Missing 'Losses' in stats line.");
 
-    Ok((wins, losses))
+    Ok((wins, draws, losses))
 }
 
 #[test]
@@ -102,5 +139,5 @@ Total Time: 00:06:14 (hours:minutes:seconds)
 "#;
 
     let score = parse_score(output).unwrap();
-    assert_eq!(score, (377, 354));
+    assert_eq!(score, (377, 269, 354));
 }
