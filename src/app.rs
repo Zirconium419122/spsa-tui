@@ -14,9 +14,9 @@ use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEventKind},
     layout::{Constraint, Direction, Layout},
-    symbols::{Marker, border},
+    symbols::Marker,
     text::Line,
-    widgets::{Axis, Block, Chart, Dataset, GraphType, Paragraph, Widget},
+    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph, Widget},
 };
 
 use crate::{
@@ -54,7 +54,16 @@ impl Widget for &App {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
             .areas(area);
-        let title = Line::from(" SPSA tuner ").centered();
+
+        let [left_top, left_bottom] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
+            .areas(left);
+
+        let [right_top, right_bottom] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
+            .areas(right);
 
         let data: Vec<(String, Vec<(f64, f64)>)> = self
             .param_hist
@@ -95,6 +104,7 @@ impl Widget for &App {
             .map(|(_, x)| *x)
             .min_by(|a, b| a.total_cmp(b))
             .unwrap_or(0.0)
+            .ceil()
             - 5.0;
         let max = data
             .iter()
@@ -102,6 +112,7 @@ impl Widget for &App {
             .map(|(_, x)| *x)
             .max_by(|a, b| a.total_cmp(b))
             .unwrap_or(0.0)
+            .floor()
             + 5.0;
 
         let min_str = format!("{:.2}", min);
@@ -115,9 +126,12 @@ impl Widget for &App {
             .x_axis(x_axis)
             .y_axis(y_axis)
             .legend_position(None)
-            .render(left, buf);
+            .block(Block::new().borders(Borders::ALL))
+            .render(left_top, buf);
 
-        let block = Block::bordered().title(title).border_set(border::THICK);
+        Paragraph::new("left_bottom")
+            .block(Block::new().borders(Borders::ALL))
+            .render(left_bottom, buf);
 
         let params_str = self
             .param_hist
@@ -141,8 +155,17 @@ impl Widget for &App {
         );
         Paragraph::new(info)
             .left_aligned()
-            .block(block)
-            .render(right, buf);
+            .block(
+                Block::new()
+                    .borders(Borders::ALL)
+                    .title(Line::from(" SPSA tuner ").centered()),
+            )
+            .render(right_bottom, buf);
+
+        Block::new()
+            .borders(Borders::ALL)
+            .title(Line::from(" Settings ").centered())
+            .render(right_top, buf);
     }
 }
 

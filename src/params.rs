@@ -1,10 +1,10 @@
-use std::{collections::HashMap, io::Error};
+use std::{collections::HashMap, error::Error};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::uci::get_tunable_params;
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Param {
     pub value: f64,
     pub min: f64,
@@ -15,7 +15,7 @@ pub struct Param {
 
 pub type ParamSet = HashMap<String, Param>;
 
-pub fn build_param_set(engine: &str) -> Result<ParamSet, Error> {
+pub fn build_param_set(engine: &str) -> Result<ParamSet, Box<dyn Error>> {
     let options = get_tunable_params(engine)?;
 
     let mut params = HashMap::new();
@@ -37,10 +37,17 @@ pub fn build_param_set(engine: &str) -> Result<ParamSet, Error> {
     Ok(params)
 }
 
-pub fn save_checkpoint(params: &ParamSet, iteration: usize) -> Result<(), Error> {
+pub fn save_checkpoint(params: &ParamSet, iteration: usize) -> Result<(), Box<dyn Error>> {
     std::fs::create_dir_all("checkpoints")?;
 
     let path = format!("checkpoints/spsa_checkpoint_{}.json", iteration);
     let json = serde_json::to_string_pretty(params)?;
-    std::fs::write(path, json)
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
+pub fn load_checkpoint(iteration: usize) -> Result<ParamSet, Box<dyn Error>> {
+    let path = format!("checkpoints/spsa_checkpoint_{}.json", iteration);
+    let file = std::fs::read(path)?;
+    Ok(serde_json::from_slice(&file)?)
 }
