@@ -1,4 +1,12 @@
-use std::{error::Error, sync::{Arc, atomic::AtomicBool, mpsc::Sender}};
+use std::{
+    error::Error,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc::Sender,
+    },
+    time::Instant,
+};
 
 use crate::{
     fastchess::{MatchConfig, run_match},
@@ -8,8 +16,9 @@ use crate::{
 
 pub struct SpsaConfig {
     pub engine: String,
-    pub total_iterations: usize,
+    pub total_iterations: Arc<AtomicUsize>,
     pub save_iterations: usize,
+    pub start_k: usize,
     pub params: ParamSet,
     pub book: String,
     pub games_per_iter: usize,
@@ -24,6 +33,7 @@ pub enum SpsaEvent {
         wins: usize,
         draws: usize,
         losses: usize,
+        time: usize,
     },
     Error(Box<dyn Error>),
 }
@@ -32,7 +42,7 @@ unsafe impl Send for SpsaEvent {}
 
 #[derive(Clone)]
 pub struct Spsa {
-    total_iterations: usize,
+    total_iterations: Arc<AtomicUsize>,
     save_iterations: usize,
     params: ParamSet,
     match_config: MatchConfig,
@@ -49,10 +59,18 @@ impl Iterator for Spsa {
             return None;
         }
 
-        let (deltas, plus_options, minus_options) =
-            perturb(&self.params, self.k, self.total_iterations);
+        let start = Instant::now();
 
-        let (wins, draws, losses) = match run_match(&self.match_config, &plus_options, &minus_options, self.running.clone()) {
+        let total_iterations = self.total_iterations.load(Ordering::Relaxed);
+
+        let (deltas, plus_options, minus_options) = perturb(&self.params, self.k, total_iterations);
+
+        let (wins, draws, losses) = match run_match(
+            &self.match_config,
+            &plus_options,
+            &minus_options,
+            self.running.clone(),
+        ) {
             Ok(v) => v,
             Err(e) => {
                 let _ = self.send(SpsaEvent::Error(e));
@@ -62,7 +80,7 @@ impl Iterator for Spsa {
 
         update(&mut self.params, &deltas, wins, losses);
 
-        if self.k % self.save_iterations == 0 || self.k == self.total_iterations {
+        if self.k.is_multiple_of(self.save_iterations) || self.k == total_iterations {
             save_checkpoint(&self.params, self.k).unwrap();
         }
 
@@ -72,6 +90,7 @@ impl Iterator for Spsa {
             wins: wins as usize,
             draws: draws as usize,
             losses: losses as usize,
+            time: start.elapsed().as_millis() as usize,
         });
 
         self.k += 1;
@@ -95,7 +114,7 @@ impl Spsa {
             save_iterations: config.save_iterations,
             params: config.params,
             match_config,
-            k: 1,
+            k: config.start_k,
             tx,
             running,
         }
@@ -107,6 +126,6 @@ impl Spsa {
     }
 
     fn is_done(&self) -> bool {
-        self.k > self.total_iterations
+        self.k > self.total_iterations.load(Ordering::Relaxed)
     }
 }

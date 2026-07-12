@@ -1,8 +1,13 @@
 use std::{
-    collections::HashMap, error::Error, process::{Command, Stdio}, sync::{
+    collections::HashMap,
+    error::Error,
+    process::{Command, Stdio},
+    sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-    }, thread, time::Duration
+    },
+    thread,
+    time::Duration,
 };
 
 #[cfg(unix)]
@@ -28,7 +33,7 @@ pub fn run_match(
     cmd.arg("-engine")
         .arg(format!("cmd={}", config.engine))
         .arg("name=plus");
-    cmd.arg("option.Hash=16");
+    cmd.arg("option.Hash=64");
     for (name, value) in plus_options {
         cmd.arg(format!("option.{}={}", name, value));
     }
@@ -36,7 +41,7 @@ pub fn run_match(
     cmd.arg("-engine")
         .arg(format!("cmd={}", config.engine))
         .arg("name=minus");
-    cmd.arg("option.Hash=16");
+    cmd.arg("option.Hash=64");
     for (name, value) in minus_options {
         cmd.arg(format!("option.{}={}", name, value));
     }

@@ -51,3 +51,42 @@ pub fn load_checkpoint(iteration: usize) -> Result<ParamSet, Box<dyn Error>> {
     let file = std::fs::read(path)?;
     Ok(serde_json::from_slice(&file)?)
 }
+
+pub fn find_latest_checkpoint() -> Option<usize> {
+    let dir = std::fs::read_dir("checkpoints").ok()?;
+
+    let mut latest = None;
+
+    for entry in dir.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+
+        if let Some(number) = name
+            .strip_prefix("spsa_checkpoint_")
+            .and_then(|s| s.strip_suffix(".json"))
+            && let Ok(number) = number.parse::<usize>()
+        {
+            latest = Some(latest.map_or(number, |latest: usize| latest.max(number)));
+        }
+    }
+
+    latest
+}
+
+pub fn load_checkpoint_history() -> Result<Vec<(usize, ParamSet)>, Box<dyn Error>> {
+    let Some(total_iterations) = find_latest_checkpoint() else {
+        return Err("No checkpoints found".into());
+    };
+
+    let mut checkpoints = Vec::new();
+
+    for iteration in 1..=total_iterations {
+        if let Ok(params) = load_checkpoint(iteration) {
+            checkpoints.push((iteration, params));
+        }
+    }
+
+    Ok(checkpoints)
+}

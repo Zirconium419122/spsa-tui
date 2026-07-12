@@ -3,7 +3,7 @@ use std::{
     error::Error,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::Receiver,
     },
     thread::{self, JoinHandle},
@@ -20,13 +20,13 @@ use ratatui::{
 };
 
 use crate::{
-    params::build_param_set,
+    params::{ParamSet, build_param_set, find_latest_checkpoint, load_checkpoint_history},
     spsa::{Spsa, SpsaConfig, SpsaEvent},
 };
 
 pub struct App {
     engine: String,
-    total_iterations: usize,
+    total_iterations: Arc<AtomicUsize>,
     save_iterations: usize,
     book: String,
     games_per_iter: usize,
@@ -38,6 +38,7 @@ pub struct App {
     wins: usize,
     draws: usize,
     losses: usize,
+    time_iter: usize,
 
     spsa: Option<Arc<Mutex<Spsa>>>,
     spsa_handle: Option<JoinHandle<()>>,
@@ -97,21 +98,20 @@ impl Widget for &App {
             .bounds([0.0, self.k as f64])
             .labels(["0", &iterations]);
 
-        // Fix this later i guess...
-        let min = data
+        let values: Vec<f64> = data
             .iter()
-            .flat_map(|(_, x)| x)
-            .map(|(_, x)| *x)
+            .flat_map(|(_, x)| x.iter().map(|(_, v)| *v))
+            .collect();
+        let min = values
+            .iter()
             .min_by(|a, b| a.total_cmp(b))
-            .unwrap_or(0.0)
+            .unwrap_or(&0.0)
             .ceil()
             - 5.0;
-        let max = data
+        let max = values
             .iter()
-            .flat_map(|(_, x)| x)
-            .map(|(_, x)| *x)
             .max_by(|a, b| a.total_cmp(b))
-            .unwrap_or(0.0)
+            .unwrap_or(&0.0)
             .floor()
             + 5.0;
 
@@ -162,10 +162,33 @@ impl Widget for &App {
             )
             .render(right_bottom, buf);
 
-        Block::new()
-            .borders(Borders::ALL)
-            .title(Line::from(" Settings ").centered())
+        let etc = (self.total_iterations.load(Ordering::Relaxed) - self.k) * self.time_iter / 1000;
+
+        let settings = [
+            format!("Engine           : {}", self.engine),
+            format!("Book             : {}", self.book),
+            format!("Total iterations : {}", self.total_iterations.load(Ordering::Relaxed)),
+            format!("Games per iter   : {}", self.games_per_iter),
+            format!("Concurrency      : {}", self.concurrency),
+            format!("Time control     : {}", self.tc),
+            "".into(),
+            format!("Estimated time   : {:02}:{:02}:{:02}", etc / 3600, (etc % 3600) / 60, etc % 60),
+        ]
+        .join("\n");
+        Paragraph::new(settings)
+            .left_aligned()
+            .block(
+                Block::new()
+                    .borders(Borders::ALL)
+                    .title(Line::from(" Settings ").centered()),
+            )
             .render(right_top, buf);
+    }
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -173,18 +196,19 @@ impl App {
     pub fn new() -> App {
         App {
             engine: "./ferrischess".into(),
-            total_iterations: 2000,
+            total_iterations: Arc::new(AtomicUsize::new(2000)),
             save_iterations: 10,
             book: "../8moves_v3.pgn".into(),
-            games_per_iter: 64,
+            games_per_iter: 16,
             concurrency: 8,
-            tc: "1+0.01".into(),
+            tc: "10+0.1".into(),
 
             param_hist: HashMap::new(),
             k: 1,
             wins: 0,
             draws: 0,
             losses: 0,
+            time_iter: 0,
 
             spsa: None,
             spsa_handle: None,
@@ -211,6 +235,7 @@ impl App {
                         wins,
                         draws,
                         losses,
+                        time,
                     } => {
                         for p in params {
                             self.param_hist.entry(p.0).or_default().push(p.1.value);
@@ -219,6 +244,7 @@ impl App {
                         self.wins = wins;
                         self.draws = draws;
                         self.losses = losses;
+                        self.time_iter = (self.time_iter + time) / 2;
                     }
                     SpsaEvent::Error(e) => return Err(e),
                 }
@@ -235,9 +261,8 @@ impl App {
                 let running = self.running.clone();
 
                 self.spsa_handle = Some(thread::spawn(move || {
-                    if spsa.lock().unwrap().next().is_some() {
-                        running.store(false, Ordering::Relaxed)
-                    }
+                    spsa.lock().unwrap().next();
+                    running.store(false, Ordering::Relaxed);
                 }));
             }
 
@@ -268,6 +293,7 @@ impl App {
         match key_event.code {
             KeyCode::Char('q') => self.exit(),
             KeyCode::Char(' ') => self.paused = !self.paused,
+            KeyCode::Char('r') => self.resume_from_checkpoint(),
             KeyCode::Enter => {
                 let params = match build_param_set(&self.engine) {
                     Ok(v) => v,
@@ -283,9 +309,10 @@ impl App {
 
                 let config = SpsaConfig {
                     engine: self.engine.clone(),
-                    total_iterations: self.total_iterations,
+                    total_iterations: self.total_iterations.clone(),
                     save_iterations: self.save_iterations,
                     params,
+                    start_k: 1,
                     book: self.book.clone(),
                     games_per_iter: self.games_per_iter,
                     concurrency: self.concurrency,
@@ -300,8 +327,75 @@ impl App {
                     self.running.clone(),
                 ))));
             }
+            KeyCode::Up => {
+                self.total_iterations.fetch_add(100, Ordering::Relaxed);
+            }
+            KeyCode::Down => {
+                let previous = self.total_iterations.fetch_sub(100, Ordering::Relaxed);
+                if previous <= 100 {
+                    self.total_iterations.store(1, Ordering::Relaxed);
+                }
+            }
             _ => {}
         }
+    }
+
+    fn resume_from_checkpoint(&mut self) {
+        let Some(latest_iteration) = find_latest_checkpoint() else {
+            return;
+        };
+
+        let Ok(checkpoint_history) = load_checkpoint_history() else {
+            return;
+        };
+
+        let latest_params = checkpoint_history.last().map(|(_, p)| p.clone()).unwrap();
+
+        self.param_hist.clear();
+
+        let mut prev_iter = 0;
+        let mut prev_params: Option<&ParamSet> = None;
+
+        for (cur_iter, cur_params) in &checkpoint_history {
+            let gap = cur_iter.saturating_sub(prev_iter).max(1);
+
+            for (name, cur_param) in cur_params {
+                let prev_value = prev_params
+                    .and_then(|params| params.get(name))
+                    .map_or(cur_param.value, |p| p.value);
+
+                let entry = self.param_hist.entry(name.clone()).or_default();
+                for i in 1..=gap {
+                    let t = i as f64 / gap as f64;
+                    entry.push(prev_value + (cur_param.value - prev_value) * t);
+                }
+            }
+
+            prev_iter = *cur_iter;
+            prev_params = Some(cur_params);
+        }
+
+        self.k = latest_iteration + 1;
+
+        let config = SpsaConfig {
+            engine: self.engine.clone(),
+            total_iterations: self.total_iterations.clone(),
+            save_iterations: self.save_iterations,
+            params: latest_params,
+            start_k: self.k,
+            book: self.book.clone(),
+            games_per_iter: self.games_per_iter,
+            concurrency: self.concurrency,
+            tc: self.tc.clone(),
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel::<SpsaEvent>();
+        self.rx = Some(rx);
+        self.spsa = Some(Arc::new(Mutex::new(Spsa::new(
+            config,
+            tx,
+            self.running.clone(),
+        ))));
     }
 
     fn exit(&mut self) {
