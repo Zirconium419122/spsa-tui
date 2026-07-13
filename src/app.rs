@@ -14,9 +14,10 @@ use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEventKind},
     layout::{Constraint, Direction, Layout},
+    style::Style,
     symbols::Marker,
     text::Line,
-    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph, Widget},
+    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph, Row, Table, Widget},
 };
 
 use crate::{
@@ -129,8 +130,54 @@ impl Widget for &App {
             .block(Block::new().borders(Borders::ALL))
             .render(left_top, buf);
 
-        Paragraph::new("left_bottom")
-            .block(Block::new().borders(Borders::ALL))
+        let header = Row::new(["Name", "Value", "SD100", "SD500", "SDALL", "Delta"])
+            .style(Style::new().bold())
+            .bottom_margin(1);
+
+        let widths = [
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
+        ];
+
+        macro_rules! standard_deviation {
+            ($values:expr, $average:expr, $n:expr) => {{
+                let values = $values.get($values.len().saturating_sub($n)..).unwrap();
+                let s_sq = values
+                    .iter()
+                    .fold(0.0, |acc, x| acc + (x - $average).powi(2))
+                    / (values.len() - 1) as f64;
+                s_sq.sqrt()
+            }};
+            ($values:expr, $average:expr) => {
+                standard_deviation!($values, $average, $values.len())
+            };
+        }
+
+        let mut rows = Vec::new();
+        for (name, hist) in &self.param_hist {
+            let average = hist.iter().sum::<f64>() / hist.len() as f64;
+
+            rows.push(Row::new([
+                name.clone(),
+                format!("{:.3}", hist.last().unwrap()),
+                format!("{:.3}", standard_deviation!(hist, average, 100)),
+                format!("{:.3}", standard_deviation!(hist, average, 500)),
+                format!("{:.3}", standard_deviation!(hist, average)),
+                format!("{:.3}", hist.last().unwrap() - hist[0]),
+            ]));
+        }
+
+        Table::new(rows, widths)
+            .header(header)
+            .block(
+                Block::new()
+                    .borders(Borders::ALL)
+                    .title_top(Line::from(" Parameters ").left_aligned()),
+            )
             .render(left_bottom, buf);
 
         let params_str = self
@@ -158,7 +205,7 @@ impl Widget for &App {
             .block(
                 Block::new()
                     .borders(Borders::ALL)
-                    .title(Line::from(" SPSA tuner ").centered()),
+                    .title(Line::from(" Iteration ").centered()),
             )
             .render(right_bottom, buf);
 
@@ -215,7 +262,7 @@ impl App {
             rx: None,
 
             running: Arc::new(AtomicBool::new(false)),
-            paused: false,
+            paused: true,
             exit: false,
         }
     }
@@ -326,6 +373,8 @@ impl App {
                     tx,
                     self.running.clone(),
                 ))));
+
+                self.paused = false;
             }
             KeyCode::Up => {
                 self.total_iterations.fetch_add(100, Ordering::Relaxed);
