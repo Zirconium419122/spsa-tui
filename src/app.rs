@@ -67,12 +67,14 @@ impl Widget for &App {
             .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
             .areas(right);
 
-        let data: Vec<(String, Vec<(f64, f64)>)> = self
-            .param_hist
+        let mut param_hist = Vec::from_iter(self.param_hist.iter());
+        param_hist.sort_by_key(|x| x.0);
+
+        let data: Vec<(String, Vec<(f64, f64)>)> = param_hist
             .iter()
             .map(|(name, param)| {
                 (
-                    name.clone(),
+                    (*name).clone(),
                     param
                         .iter()
                         .enumerate()
@@ -158,11 +160,11 @@ impl Widget for &App {
         }
 
         let mut rows = Vec::new();
-        for (name, hist) in &self.param_hist {
+        for (name, hist) in &param_hist {
             let average = hist.iter().sum::<f64>() / hist.len() as f64;
 
             rows.push(Row::new([
-                name.clone(),
+                (*name).clone(),
                 format!("{:.3}", hist.last().unwrap()),
                 format!("{:.3}", standard_deviation!(hist, average, 100)),
                 format!("{:.3}", standard_deviation!(hist, average, 500)),
@@ -180,8 +182,7 @@ impl Widget for &App {
             )
             .render(left_bottom, buf);
 
-        let params_str = self
-            .param_hist
+        let params_str = param_hist
             .iter()
             .map(|(name, vals)| {
                 let val = vals.last().unwrap_or(&0.0);

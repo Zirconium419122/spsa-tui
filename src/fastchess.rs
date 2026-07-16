@@ -104,7 +104,9 @@ fn parse_score(output: &str) -> Result<(isize, isize, isize), Box<dyn Error>> {
     let stats_line = output
         .lines()
         .find(|line| line.starts_with("Games:"))
-        .ok_or::<Box<dyn Error>>("Could not find stats line in fastchess output.".into())?;
+        .ok_or::<Box<dyn Error>>(
+            format!("Could not find stats line in fastchess output:\n{}", output).into(),
+        )?;
 
     let mut wins: Option<isize> = None;
     let mut draws: Option<isize> = None;
