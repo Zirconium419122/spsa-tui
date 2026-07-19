@@ -10,14 +10,13 @@ use std::{
 
 use crate::{
     fastchess::{MatchConfig, run_match},
-    params::{ParamSet, save_checkpoint},
+    params::ParamSet,
     tune::{perturb, update},
 };
 
 pub struct SpsaConfig {
     pub engine: String,
     pub total_iterations: Arc<AtomicUsize>,
-    pub save_iterations: usize,
     pub start_k: usize,
     pub params: ParamSet,
     pub book: String,
@@ -43,7 +42,6 @@ unsafe impl Send for SpsaEvent {}
 #[derive(Clone)]
 pub struct Spsa {
     total_iterations: Arc<AtomicUsize>,
-    save_iterations: usize,
     params: ParamSet,
     match_config: MatchConfig,
     k: usize,
@@ -80,10 +78,6 @@ impl Iterator for Spsa {
 
         update(&mut self.params, &deltas, wins, losses);
 
-        if self.k.is_multiple_of(self.save_iterations) || self.k == total_iterations {
-            save_checkpoint(&self.params, self.k).unwrap();
-        }
-
         let _ = self.send(SpsaEvent::Iteration {
             params: self.params.clone(),
             k: self.k,
@@ -111,7 +105,6 @@ impl Spsa {
 
         Spsa {
             total_iterations: config.total_iterations,
-            save_iterations: config.save_iterations,
             params: config.params,
             match_config,
             k: config.start_k,

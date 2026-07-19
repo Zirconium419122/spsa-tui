@@ -21,7 +21,8 @@ use ratatui::{
 };
 
 use crate::{
-    params::{ParamSet, build_param_set, find_latest_checkpoint, load_checkpoint_history},
+    checkpoint::Checkpoint,
+    params::build_param_set,
     spsa::{Spsa, SpsaConfig, SpsaEvent},
 };
 
@@ -44,6 +45,8 @@ pub struct App {
     spsa: Option<Arc<Mutex<Spsa>>>,
     spsa_handle: Option<JoinHandle<()>>,
     rx: Option<Receiver<SpsaEvent>>,
+
+    checkpoint: Option<Checkpoint>,
 
     running: Arc<AtomicBool>,
     paused: bool,
@@ -262,6 +265,8 @@ impl App {
             spsa_handle: None,
             rx: None,
 
+            checkpoint: None,
+
             running: Arc::new(AtomicBool::new(false)),
             paused: true,
             exit: false,
@@ -285,14 +290,27 @@ impl App {
                         losses,
                         time,
                     } => {
-                        for p in params {
-                            self.param_hist.entry(p.0).or_default().push(p.1.value);
+                        for p in &params {
+                            self.param_hist
+                                .entry(p.0.to_string())
+                                .or_default()
+                                .push(p.1.value);
                         }
                         self.k = k;
                         self.wins = wins;
                         self.draws = draws;
                         self.losses = losses;
                         self.time_iter = (self.time_iter + time) / 2;
+
+                        if let Some(checkpoint) = &mut self.checkpoint {
+                            checkpoint.update(&params, self.k, self.wins, self.draws, self.losses);
+
+                            if self.k.is_multiple_of(self.save_iterations)
+                                || self.k == self.total_iterations.load(Ordering::Relaxed)
+                            {
+                                checkpoint.write().unwrap();
+                            }
+                        }
                     }
                     SpsaEvent::Error(e) => return Err(e),
                 }
@@ -348,17 +366,20 @@ impl App {
                     Err(_) => return,
                 };
 
-                for p in &params {
-                    self.param_hist
-                        .entry(p.0.clone())
-                        .or_default()
-                        .push(p.1.value);
-                }
+                let total_iter = self.total_iterations.load(Ordering::Relaxed);
+                let checkpoint = Checkpoint::new(
+                    self.engine.clone(),
+                    self.book.clone(),
+                    self.tc.clone(),
+                    total_iter,
+                    &params,
+                );
+                self.param_hist = checkpoint.param_hist_map();
+                self.checkpoint = Some(checkpoint);
 
                 let config = SpsaConfig {
                     engine: self.engine.clone(),
                     total_iterations: self.total_iterations.clone(),
-                    save_iterations: self.save_iterations,
                     params,
                     start_k: 1,
                     book: self.book.clone(),
@@ -391,47 +412,18 @@ impl App {
     }
 
     fn resume_from_checkpoint(&mut self) {
-        let Some(latest_iteration) = find_latest_checkpoint() else {
+        let Ok(checkpoint) = Checkpoint::load() else {
             return;
         };
 
-        let Ok(checkpoint_history) = load_checkpoint_history() else {
-            return;
-        };
-
-        let latest_params = checkpoint_history.last().map(|(_, p)| p.clone()).unwrap();
-
-        self.param_hist.clear();
-
-        let mut prev_iter = 0;
-        let mut prev_params: Option<&ParamSet> = None;
-
-        for (cur_iter, cur_params) in &checkpoint_history {
-            let gap = cur_iter.saturating_sub(prev_iter).max(1);
-
-            for (name, cur_param) in cur_params {
-                let prev_value = prev_params
-                    .and_then(|params| params.get(name))
-                    .map_or(cur_param.value, |p| p.value);
-
-                let entry = self.param_hist.entry(name.clone()).or_default();
-                for i in 1..=gap {
-                    let t = i as f64 / gap as f64;
-                    entry.push(prev_value + (cur_param.value - prev_value) * t);
-                }
-            }
-
-            prev_iter = *cur_iter;
-            prev_params = Some(cur_params);
-        }
-
-        self.k = latest_iteration + 1;
+        self.checkpoint = Some(checkpoint.clone());
+        self.param_hist = checkpoint.param_hist_map();
+        self.k = checkpoint.current_iteration + 1;
 
         let config = SpsaConfig {
             engine: self.engine.clone(),
             total_iterations: self.total_iterations.clone(),
-            save_iterations: self.save_iterations,
-            params: latest_params,
+            params: checkpoint.latest_params(),
             start_k: self.k,
             book: self.book.clone(),
             games_per_iter: self.games_per_iter,
