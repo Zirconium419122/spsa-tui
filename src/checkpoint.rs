@@ -21,11 +21,17 @@ pub struct Checkpoint {
     pub engine: String,
     pub book: String,
     pub tc: String,
-    pub total_iteration: usize,
+
+    pub total_iterations: usize,
     pub current_iteration: usize,
+
     pub wins: usize,
     pub draws: usize,
     pub losses: usize,
+
+    pub time_iter: usize,
+    pub time_samples: u32,
+
     pub params: Vec<ParamHist>,
 }
 
@@ -34,7 +40,7 @@ impl Checkpoint {
         engine: String,
         book: String,
         tc: String,
-        total_iteration: usize,
+        total_iterations: usize,
         params: &ParamSet,
     ) -> Checkpoint {
         let param_hist = params
@@ -55,26 +61,40 @@ impl Checkpoint {
             engine,
             book,
             tc,
-            total_iteration,
+
+            total_iterations,
             current_iteration: 1,
+
             wins: 0,
             draws: 0,
             losses: 0,
+
+            time_iter: 0,
+            time_samples: 0,
+
             params: param_hist,
         }
     }
 
-    pub fn update(&mut self, params: &ParamSet, k: usize, wins: usize, draws: usize, losses: usize) {
+    pub fn update(&mut self, params: &ParamSet, k: usize, wins: usize, draws: usize, losses: usize, time: usize) {
         for p in params {
             if let Some(hist) = self.params.iter_mut().find(|x| x.name == *p.0) {
                 hist.values.push(p.1.value);
             }
         }
-        self.current_iteration = k;
         self.wins = wins;
         self.draws = draws;
         self.losses = losses;
-        self.total_iteration = self.total_iteration.max(k);
+        self.total_iterations = self.total_iterations.max(k);
+        self.current_iteration = k;
+
+        const ALPHA: f64 = 0.2;
+        if self.time_samples == 0 {
+            self.time_iter = time;
+        } else {
+            self.time_iter = (self.time_iter as f64 * (1.0 - ALPHA) + time as f64 * ALPHA) as usize;
+        }
+        self.time_samples += 1;
     }
 
     pub fn write(&self) -> Result<(), Box<dyn Error>> {

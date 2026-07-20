@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     error::Error,
     sync::{
         Arc, Mutex,
@@ -35,13 +34,6 @@ pub struct App {
     concurrency: usize,
     tc: String,
 
-    param_hist: HashMap<String, Vec<f64>>,
-    k: usize,
-    wins: usize,
-    draws: usize,
-    losses: usize,
-    time_iter: usize,
-
     spsa: Option<Arc<Mutex<Spsa>>>,
     spsa_handle: Option<JoinHandle<()>>,
     rx: Option<Receiver<SpsaEvent>>,
@@ -55,6 +47,12 @@ pub struct App {
 
 impl Widget for &App {
     fn render(self, area: ratatui::prelude::Rect, buf: &mut ratatui::prelude::Buffer) {
+        let current_k = self.checkpoint.as_ref().map_or(0, |c| c.current_iteration);
+        let wins = self.checkpoint.as_ref().map_or(0, |c| c.wins);
+        let draws = self.checkpoint.as_ref().map_or(0, |c| c.draws);
+        let losses = self.checkpoint.as_ref().map_or(0, |c| c.losses);
+        let time_iter = self.checkpoint.as_ref().map_or(0, |c| c.time_iter);
+
         let [left, right] = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
@@ -70,7 +68,12 @@ impl Widget for &App {
             .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
             .areas(right);
 
-        let mut param_hist = Vec::from_iter(self.param_hist.iter());
+        let param_hist_map = self
+            .checkpoint
+            .as_ref()
+            .map(Checkpoint::param_hist_map)
+            .unwrap_or_default();
+        let mut param_hist = Vec::from_iter(param_hist_map.iter());
         param_hist.sort_by_key(|x| x.0);
 
         let data: Vec<(String, Vec<(f64, f64)>)> = param_hist
@@ -98,10 +101,10 @@ impl Widget for &App {
             })
             .collect();
 
-        let iterations = self.k.to_string();
+        let iterations = current_k.to_string();
         let x_axis = Axis::default()
             .title("Iterations")
-            .bounds([0.0, self.k as f64])
+            .bounds([0.0, current_k as f64])
             .labels(["0", &iterations]);
 
         let values: Vec<f64> = data
@@ -194,15 +197,15 @@ impl Widget for &App {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let total = self.wins + self.losses;
+        let total = wins + losses;
         let score = if total > 0 {
-            format!("{:.2}%", self.wins as f64 / total as f64 * 100.0)
+            format!("{:.2}%", wins as f64 / total as f64 * 100.0)
         } else {
             "-".into()
         };
         let info = format!(
             "Iteration {}:\n\nWins:   {}\nDraws:  {}\nLosses: {}\nScore:  {}\n\n{}",
-            self.k, self.wins, self.draws, self.losses, score, params_str
+            current_k, wins, draws, losses, score, params_str
         );
         Paragraph::new(info)
             .left_aligned()
@@ -213,7 +216,7 @@ impl Widget for &App {
             )
             .render(right_bottom, buf);
 
-        let etc = (self.total_iterations.load(Ordering::Relaxed) - self.k) * self.time_iter / 1000;
+        let etc = (self.total_iterations.load(Ordering::Relaxed) - current_k) * time_iter / 1000;
 
         let settings = [
             format!("Engine           : {}", self.engine),
@@ -254,13 +257,6 @@ impl App {
             concurrency: 8,
             tc: "10+0.1".into(),
 
-            param_hist: HashMap::new(),
-            k: 1,
-            wins: 0,
-            draws: 0,
-            losses: 0,
-            time_iter: 0,
-
             spsa: None,
             spsa_handle: None,
             rx: None,
@@ -290,23 +286,11 @@ impl App {
                         losses,
                         time,
                     } => {
-                        for p in &params {
-                            self.param_hist
-                                .entry(p.0.to_string())
-                                .or_default()
-                                .push(p.1.value);
-                        }
-                        self.k = k;
-                        self.wins = wins;
-                        self.draws = draws;
-                        self.losses = losses;
-                        self.time_iter = (self.time_iter + time) / 2;
-
                         if let Some(checkpoint) = &mut self.checkpoint {
-                            checkpoint.update(&params, self.k, self.wins, self.draws, self.losses);
+                            checkpoint.update(&params, k, wins, draws, losses, time);
 
-                            if self.k.is_multiple_of(self.save_iterations)
-                                || self.k == self.total_iterations.load(Ordering::Relaxed)
+                            if k.is_multiple_of(self.save_iterations)
+                                || k == self.total_iterations.load(Ordering::Relaxed)
                             {
                                 checkpoint.write().unwrap();
                             }
@@ -367,15 +351,13 @@ impl App {
                 };
 
                 let total_iter = self.total_iterations.load(Ordering::Relaxed);
-                let checkpoint = Checkpoint::new(
+                self.checkpoint = Some(Checkpoint::new(
                     self.engine.clone(),
                     self.book.clone(),
                     self.tc.clone(),
                     total_iter,
                     &params,
-                );
-                self.param_hist = checkpoint.param_hist_map();
-                self.checkpoint = Some(checkpoint);
+                ));
 
                 let config = SpsaConfig {
                     engine: self.engine.clone(),
@@ -416,15 +398,14 @@ impl App {
             return;
         };
 
+        let start_k = checkpoint.current_iteration + 1;
         self.checkpoint = Some(checkpoint.clone());
-        self.param_hist = checkpoint.param_hist_map();
-        self.k = checkpoint.current_iteration + 1;
 
         let config = SpsaConfig {
             engine: self.engine.clone(),
             total_iterations: self.total_iterations.clone(),
             params: checkpoint.latest_params(),
-            start_k: self.k,
+            start_k,
             book: self.book.clone(),
             games_per_iter: self.games_per_iter,
             concurrency: self.concurrency,
