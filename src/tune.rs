@@ -41,22 +41,28 @@ pub fn perturb(
     let mut minus_options = HashMap::new();
 
     for (name, p) in params {
-        let (a_k, c_k) = gain_sequences(k, total_iterations, p);
-        let delta = if rng.random_bool(0.5) { 1.0 } else { -1.0 };
+        if p.tune {
+            let (a_k, c_k) = gain_sequences(k, total_iterations, p);
+            let delta = if rng.random_bool(0.5) { 1.0 } else { -1.0 };
 
-        let plus_value = (p.value + c_k * delta).clamp(p.min, p.max);
-        let minus_value = (p.value - c_k * delta).clamp(p.min, p.max);
+            let plus_value = (p.value + c_k * delta).clamp(p.min, p.max);
+            let minus_value = (p.value - c_k * delta).clamp(p.min, p.max);
 
-        plus_options.insert(
-            name.clone(),
-            (plus_value + rng.random::<f64>()).floor() as isize,
-        );
-        minus_options.insert(
-            name.clone(),
-            (minus_value + rng.random::<f64>()).floor() as isize,
-        );
+            plus_options.insert(
+                name.clone(),
+                (plus_value + rng.random::<f64>()).floor() as isize,
+            );
+            minus_options.insert(
+                name.clone(),
+                (minus_value + rng.random::<f64>()).floor() as isize,
+            );
 
-        deltas.insert(name.clone(), Perturbation { delta, c_k, a_k });
+            deltas.insert(name.clone(), Perturbation { delta, c_k, a_k });
+        } else {
+            let value = (p.value + rng.random::<f64>()).floor() as isize;
+            plus_options.insert(name.clone(), value);
+            minus_options.insert(name.clone(), value);
+        }
     }
 
     (deltas, plus_options, minus_options)
@@ -71,8 +77,9 @@ pub fn update(
     let score = (wins - losses) as f64;
 
     for (name, p) in params.iter_mut() {
-        let d = &deltas[name];
-        let increment = d.a_k * d.c_k * score * d.delta;
-        p.value = (p.value + increment).clamp(p.min, p.max);
+        if let Some(d) = deltas.get(name) {
+            let increment = d.a_k * d.c_k * score * d.delta;
+            p.value = (p.value + increment).clamp(p.min, p.max);
+        }
     }
 }

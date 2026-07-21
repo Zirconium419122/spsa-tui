@@ -1,4 +1,4 @@
-use std::{collections::HashMap, error::Error};
+use std::error::Error;
 
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +43,7 @@ impl Checkpoint {
         total_iterations: usize,
         params: &ParamSet,
     ) -> Checkpoint {
-        let param_hist = params
+        let mut param_hist = params
             .iter()
             .map(|(name, p)| ParamHist {
                 name: name.clone(),
@@ -53,9 +53,10 @@ impl Checkpoint {
                 c_end: p.c_end,
                 r_end: p.r_end,
                 values: vec![p.value],
-                tune: true,
+                tune: p.tune,
             })
-            .collect();
+            .collect::<Vec<_>>();
+        param_hist.sort_by_key(|p| p.name.clone());
 
         Checkpoint {
             engine,
@@ -63,7 +64,7 @@ impl Checkpoint {
             tc,
 
             total_iterations,
-            current_iteration: 1,
+            current_iteration: 0,
 
             wins: 0,
             draws: 0,
@@ -76,7 +77,15 @@ impl Checkpoint {
         }
     }
 
-    pub fn update(&mut self, params: &ParamSet, k: usize, wins: usize, draws: usize, losses: usize, time: usize) {
+    pub fn update(
+        &mut self,
+        params: &ParamSet,
+        k: usize,
+        wins: usize,
+        draws: usize,
+        losses: usize,
+        time: usize,
+    ) {
         for p in params {
             if let Some(hist) = self.params.iter_mut().find(|x| x.name == *p.0) {
                 hist.values.push(p.1.value);
@@ -95,6 +104,7 @@ impl Checkpoint {
             self.time_iter = (self.time_iter as f64 * (1.0 - ALPHA) + time as f64 * ALPHA) as usize;
         }
         self.time_samples += 1;
+        self.params.sort_by_key(|p| p.name.clone());
     }
 
     pub fn write(&self) -> Result<(), Box<dyn Error>> {
@@ -106,13 +116,6 @@ impl Checkpoint {
     pub fn load() -> Result<Checkpoint, Box<dyn Error>> {
         let file = std::fs::read("checkpoint.json")?;
         Ok(serde_json::from_slice(&file)?)
-    }
-
-    pub fn param_hist_map(&self) -> HashMap<String, Vec<f64>> {
-        self.params
-            .iter()
-            .map(|p| (p.name.clone(), p.values.clone()))
-            .collect()
     }
 
     pub fn latest_params(&self) -> ParamSet {
@@ -128,6 +131,7 @@ impl Checkpoint {
                         max: p.max,
                         c_end: p.c_end,
                         r_end: p.r_end,
+                        tune: p.tune,
                     },
                 )
             })

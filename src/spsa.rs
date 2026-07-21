@@ -118,6 +118,12 @@ impl Spsa {
         Ok(())
     }
 
+    pub fn set_param_enabled(&mut self, name: &str, enabled: bool) {
+        if let Some(p) = self.params.get_mut(name) {
+            p.tune = enabled;
+        }
+    }
+
     fn is_done(&self) -> bool {
         self.k > self.total_iterations.load(Ordering::Relaxed)
     }

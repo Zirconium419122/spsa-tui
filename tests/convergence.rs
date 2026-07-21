@@ -50,6 +50,7 @@ fn spsa_converges_on_synthetic_convex_function() {
             max: 300.0,
             c_end: 15.0,
             r_end: 0.002,
+            tune: true,
         },
     );
     params.insert(
@@ -60,6 +61,7 @@ fn spsa_converges_on_synthetic_convex_function() {
             max: 150.0,
             c_end: 7.5,
             r_end: 0.002,
+            tune: true,
         },
     );
 

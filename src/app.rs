@@ -20,10 +20,16 @@ use ratatui::{
 };
 
 use crate::{
-    checkpoint::Checkpoint,
+    checkpoint::{Checkpoint, ParamHist},
     params::build_param_set,
     spsa::{Spsa, SpsaConfig, SpsaEvent},
 };
+
+#[derive(PartialEq)]
+enum Mode {
+    Normal,
+    ParamSelect,
+}
 
 pub struct App {
     engine: String,
@@ -39,6 +45,9 @@ pub struct App {
     rx: Option<Receiver<SpsaEvent>>,
 
     checkpoint: Option<Checkpoint>,
+
+    selected_param_idx: usize,
+    mode: Mode,
 
     running: Arc<AtomicBool>,
     paused: bool,
@@ -68,20 +77,18 @@ impl Widget for &App {
             .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
             .areas(right);
 
-        let param_hist_map = self
+        let param_list: Vec<&ParamHist> = self
             .checkpoint
             .as_ref()
-            .map(Checkpoint::param_hist_map)
+            .map(|c| c.params.iter().collect())
             .unwrap_or_default();
-        let mut param_hist = Vec::from_iter(param_hist_map.iter());
-        param_hist.sort_by_key(|x| x.0);
 
-        let data: Vec<(String, Vec<(f64, f64)>)> = param_hist
+        let data: Vec<(String, Vec<(f64, f64)>)> = param_list
             .iter()
-            .map(|(name, param)| {
+            .map(|p| {
                 (
-                    (*name).clone(),
-                    param
+                    p.name.clone(),
+                    p.values
                         .iter()
                         .enumerate()
                         .map(|(i, x)| (i as f64, *x))
@@ -138,7 +145,7 @@ impl Widget for &App {
             .block(Block::new().borders(Borders::ALL))
             .render(left_top, buf);
 
-        let header = Row::new(["Name", "Value", "SD100", "SD500", "SDALL", "Delta"])
+        let header = Row::new(["Name", "Value", "SD100", "SD500", "SDALL", "Delta", "Tune"])
             .style(Style::new().bold())
             .bottom_margin(1);
 
@@ -149,6 +156,7 @@ impl Widget for &App {
             Constraint::Percentage(15),
             Constraint::Percentage(15),
             Constraint::Percentage(15),
+            Constraint::Percentage(10),
         ];
 
         macro_rules! standard_deviation {
@@ -166,33 +174,44 @@ impl Widget for &App {
         }
 
         let mut rows = Vec::new();
-        for (name, hist) in &param_hist {
-            let average = hist.iter().sum::<f64>() / hist.len() as f64;
+        for (row_idx, p) in param_list.iter().enumerate() {
+            let average = p.values.iter().sum::<f64>() / p.values.len() as f64;
+            let name = if self.mode == Mode::ParamSelect && row_idx == self.selected_param_idx {
+                format!("> {}", p.name)
+            } else {
+                p.name.clone()
+            };
 
             rows.push(Row::new([
-                (*name).clone(),
-                format!("{:.3}", hist.last().unwrap()),
-                format!("{:.3}", standard_deviation!(hist, average, 100)),
-                format!("{:.3}", standard_deviation!(hist, average, 500)),
-                format!("{:.3}", standard_deviation!(hist, average)),
-                format!("{:.3}", hist.last().unwrap() - hist[0]),
+                name,
+                format!("{:.3}", p.values.last().unwrap()),
+                format!("{:.3}", standard_deviation!(p.values, average, 100)),
+                format!("{:.3}", standard_deviation!(p.values, average, 500)),
+                format!("{:.3}", standard_deviation!(p.values, average)),
+                format!("{:.3}", p.values.last().unwrap() - p.values[0]),
+                if p.tune { "✓".into() } else { "✗".into() },
             ]));
         }
+
+        let title = match self.mode {
+            Mode::Normal => " Parameters ",
+            Mode::ParamSelect => " Parameters [select] ",
+        };
 
         Table::new(rows, widths)
             .header(header)
             .block(
                 Block::new()
                     .borders(Borders::ALL)
-                    .title_top(Line::from(" Parameters ").left_aligned()),
+                    .title_top(Line::from(title).left_aligned()),
             )
             .render(left_bottom, buf);
 
-        let params_str = param_hist
+        let params_str = param_list
             .iter()
-            .map(|(name, vals)| {
-                let val = vals.last().unwrap_or(&0.0);
-                format!("{}: {:.3}", name, val)
+            .map(|p| {
+                let val = p.values.last().unwrap_or(&0.0);
+                format!("{}: {:.3}", p.name, val)
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -266,6 +285,9 @@ impl App {
             running: Arc::new(AtomicBool::new(false)),
             paused: true,
             exit: false,
+
+            mode: Mode::Normal,
+            selected_param_idx: 0,
         }
     }
 
@@ -305,6 +327,14 @@ impl App {
                 && !self.running.load(Ordering::Relaxed)
                 && let Some(spsa) = &self.spsa
             {
+                if let Some(checkpoint) = &self.checkpoint
+                    && let Ok(mut spsa) = spsa.lock()
+                {
+                    for p in &checkpoint.params {
+                        spsa.set_param_enabled(&p.name, p.tune);
+                    }
+                }
+
                 self.running.store(true, Ordering::Relaxed);
 
                 let spsa = spsa.clone();
@@ -340,10 +370,21 @@ impl App {
     }
 
     fn handle_key_event(&mut self, key_event: event::KeyEvent) {
+        match self.mode {
+            Mode::Normal => self.handle_normal_key(key_event),
+            Mode::ParamSelect => self.handle_param_select_key(key_event),
+        }
+    }
+
+    fn handle_normal_key(&mut self, key_event: event::KeyEvent) {
         match key_event.code {
             KeyCode::Char('q') => self.exit(),
             KeyCode::Char(' ') => self.paused = !self.paused,
             KeyCode::Char('r') => self.resume_from_checkpoint(),
+            KeyCode::Tab => {
+                self.mode = Mode::ParamSelect;
+                self.selected_param_idx = 0;
+            }
             KeyCode::Enter => {
                 let params = match build_param_set(&self.engine) {
                     Ok(v) => v,
@@ -358,6 +399,7 @@ impl App {
                     total_iter,
                     &params,
                 ));
+                self.selected_param_idx = 0;
 
                 let config = SpsaConfig {
                     engine: self.engine.clone(),
@@ -393,6 +435,31 @@ impl App {
         }
     }
 
+    fn handle_param_select_key(&mut self, key_event: event::KeyEvent) {
+        match key_event.code {
+            KeyCode::Char('q') => self.exit(),
+            KeyCode::Tab | KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Up => {
+                self.selected_param_idx = self.selected_param_idx.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                if let Some(checkpoint) = &self.checkpoint
+                    && self.selected_param_idx + 1 < checkpoint.params.len()
+                {
+                    self.selected_param_idx += 1;
+                }
+            }
+            KeyCode::Char(' ') => {
+                if let Some(checkpoint) = &mut self.checkpoint
+                    && let Some(p) = checkpoint.params.get_mut(self.selected_param_idx)
+                {
+                    p.tune = !p.tune;
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn resume_from_checkpoint(&mut self) {
         let Ok(checkpoint) = Checkpoint::load() else {
             return;
@@ -400,6 +467,7 @@ impl App {
 
         let start_k = checkpoint.current_iteration + 1;
         self.checkpoint = Some(checkpoint.clone());
+        self.selected_param_idx = 0;
 
         let config = SpsaConfig {
             engine: self.engine.clone(),
@@ -427,6 +495,10 @@ impl App {
 
         if let Some(spsa_handle) = self.spsa_handle.take() {
             let _ = spsa_handle.join();
+        }
+
+        if let Some(checkpoint) = &self.checkpoint {
+            let _ = checkpoint.write();
         }
     }
 }

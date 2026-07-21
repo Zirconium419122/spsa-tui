@@ -11,6 +11,7 @@ pub struct Param {
     pub max: f64,
     pub c_end: f64,
     pub r_end: f64,
+    pub tune: bool,
 }
 
 pub type ParamSet = HashMap<String, Param>;
@@ -30,11 +31,10 @@ pub fn build_param_set(engine: &str) -> Result<ParamSet, Box<dyn Error>> {
                 max: option.max.unwrap() as f64,
                 c_end,
                 r_end: 0.002,
+                tune: true,
             },
         );
     }
 
     Ok(params)
 }
-
-
