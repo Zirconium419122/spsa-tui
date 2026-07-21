@@ -222,16 +222,21 @@ impl Widget for &App {
         } else {
             "-".into()
         };
-        let info = format!(
-            "Iteration {}:\n\nWins:   {}\nDraws:  {}\nLosses: {}\nScore:  {}\n\n{}",
-            current_k, wins, draws, losses, score, params_str
-        );
+        let info = [
+            format!("Wins   : {}", wins),
+            format!("Draws  : {}", draws),
+            format!("Losses : {}", losses),
+            format!("Score  : {}", score),
+            "".into(),
+            params_str,
+        ]
+        .join("\n");
         Paragraph::new(info)
             .left_aligned()
             .block(
                 Block::new()
                     .borders(Borders::ALL)
-                    .title(Line::from(" Iteration ").centered()),
+                    .title(Line::from(format!(" Iteration {} ", current_k)).centered()),
             )
             .render(right_bottom, buf);
 
