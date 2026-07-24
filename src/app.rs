@@ -445,13 +445,19 @@ impl App {
             KeyCode::Char('q') => self.exit(),
             KeyCode::Tab | KeyCode::Esc => self.mode = Mode::Normal,
             KeyCode::Up => {
-                self.selected_param_idx = self.selected_param_idx.saturating_sub(1);
+                if let Some(checkpoint) = &self.checkpoint
+                    && !checkpoint.params.is_empty()
+                {
+                    self.selected_param_idx = (self.selected_param_idx + checkpoint.params.len() - 1)
+                        % checkpoint.params.len();
+                }
             }
             KeyCode::Down => {
                 if let Some(checkpoint) = &self.checkpoint
-                    && self.selected_param_idx + 1 < checkpoint.params.len()
+                    && !checkpoint.params.is_empty()
                 {
-                    self.selected_param_idx += 1;
+                    self.selected_param_idx =
+                        (self.selected_param_idx + 1) % checkpoint.params.len();
                 }
             }
             KeyCode::Char(' ') => {
