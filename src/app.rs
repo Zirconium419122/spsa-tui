@@ -23,6 +23,7 @@ use crate::{
     checkpoint::{Checkpoint, ParamHist},
     params::build_param_set,
     spsa::{Spsa, SpsaConfig, SpsaEvent},
+    tune::{a_k, c_k},
 };
 
 #[derive(PartialEq)]
@@ -145,17 +146,21 @@ impl Widget for &App {
             .block(Block::new().borders(Borders::ALL))
             .render(left_top, buf);
 
-        let header = Row::new(["Name", "Value", "SD100", "SD500", "SDALL", "Delta", "Tune"])
-            .style(Style::new().bold())
-            .bottom_margin(1);
+        let header = Row::new([
+            "Name", "Value", "SD100", "SD500", "SDALL", "Delta", "C_K", "A_K", "Tune",
+        ])
+        .style(Style::new().bold())
+        .bottom_margin(1);
 
         let widths = [
             Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
-            Constraint::Percentage(15),
+            Constraint::Percentage(10),
+            Constraint::Percentage(10),
+            Constraint::Percentage(10),
+            Constraint::Percentage(10),
+            Constraint::Percentage(10),
+            Constraint::Percentage(10),
+            Constraint::Percentage(10),
             Constraint::Percentage(10),
         ];
 
@@ -182,6 +187,7 @@ impl Widget for &App {
                 p.name.clone()
             };
 
+            let total_iterations = self.total_iterations.load(Ordering::Relaxed);
             rows.push(Row::new([
                 name,
                 format!("{:.3}", p.values.last().unwrap()),
@@ -189,6 +195,8 @@ impl Widget for &App {
                 format!("{:.3}", standard_deviation!(p.values, average, 500)),
                 format!("{:.3}", standard_deviation!(p.values, average)),
                 format!("{:.3}", p.values.last().unwrap() - p.values[0]),
+                format!("{:.3}", c_k(p.c_end, current_k, total_iterations)),
+                format!("{:.3}", a_k(p.r_end, p.c_end, current_k, total_iterations)),
                 if p.tune { "✓".into() } else { "✗".into() },
             ]));
         }

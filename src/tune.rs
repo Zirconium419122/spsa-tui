@@ -7,15 +7,19 @@ use crate::params::{Param, ParamSet};
 const ALPHA: f64 = 0.602;
 const GAMMA: f64 = 0.101;
 
-fn gain_sequences(k: usize, total_iterations: usize, param: &Param) -> (f64, f64) {
+pub fn c_k(c_end: f64, k: usize, total_iterations: usize) -> f64 {
+    c_end * (total_iterations as f64).powf(GAMMA) / (k as f64).powf(GAMMA)
+}
+
+pub fn a_k(r_end: f64, c_end: f64, k: usize, total_iterations: usize) -> f64 {
     let a_stab = total_iterations as f64 * 0.1;
+    let a_end = r_end * c_end.powi(2);
+    a_end * (a_stab + total_iterations as f64).powf(ALPHA) / (a_stab + k as f64).powf(ALPHA)
+}
 
-    let c_k = param.c_end * (total_iterations as f64).powf(GAMMA) / (k as f64).powf(GAMMA);
-
-    let a_end = param.r_end * param.c_end.powi(2);
-    let a_k = a_end * (a_stab + total_iterations as f64).powf(ALPHA)
-        / (a_stab + k as f64).powf(ALPHA)
-        / c_k.powi(2);
+fn gain_sequences(k: usize, total_iterations: usize, param: &Param) -> (f64, f64) {
+    let c_k = c_k(param.c_end, k, total_iterations);
+    let a_k = a_k(param.r_end, param.c_end, k, total_iterations);
 
     (a_k, c_k)
 }
@@ -78,7 +82,7 @@ pub fn update(
 
     for (name, p) in params.iter_mut() {
         if let Some(d) = deltas.get(name) {
-            let increment = d.a_k * d.c_k * score * d.delta;
+            let increment = d.a_k * score * d.delta / d.c_k;
             p.value = (p.value + increment).clamp(p.min, p.max);
         }
     }
