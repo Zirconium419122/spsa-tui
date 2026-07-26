@@ -21,7 +21,7 @@ pub fn build_param_set(engine: &str) -> Result<ParamSet, Box<dyn Error>> {
 
     let mut params = HashMap::new();
     for option in options {
-        let c_end = ((option.max.unwrap() - option.min.unwrap()) as f64 * 0.05).max(1.0);
+        let c_end = ((option.max.unwrap() - option.min.unwrap()) as f64 * 0.05).max(0.5);
 
         params.insert(
             option.name,
