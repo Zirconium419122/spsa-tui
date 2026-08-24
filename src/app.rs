@@ -16,7 +16,10 @@ use ratatui::{
     style::Style,
     symbols::Marker,
     text::Line,
-    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph, Row, Table, Widget},
+    widgets::{
+        Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph, Row, Table,
+        TableState, Widget,
+    },
 };
 
 use crate::{
@@ -49,14 +52,108 @@ pub struct App {
 
     selected_param_idx: usize,
     mode: Mode,
+    table_state: TableState,
 
     running: Arc<AtomicBool>,
     paused: bool,
     exit: bool,
 }
 
-impl Widget for &App {
-    fn render(self, area: ratatui::prelude::Rect, buf: &mut ratatui::prelude::Buffer) {
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl App {
+    pub fn new() -> App {
+        App {
+            engine: "./ferrischess".into(),
+            total_iterations: Arc::new(AtomicUsize::new(2000)),
+            save_iterations: 10,
+            book: "../8moves_v3.pgn".into(),
+            games_per_iter: 16,
+            concurrency: 8,
+            tc: "10+0.1".into(),
+
+            spsa: None,
+            spsa_handle: None,
+            rx: None,
+
+            checkpoint: None,
+
+            running: Arc::new(AtomicBool::new(false)),
+            paused: true,
+            exit: false,
+
+            mode: Mode::Normal,
+            selected_param_idx: 0,
+            table_state: TableState::default(),
+        }
+    }
+
+    pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<(), Box<dyn Error>> {
+        loop {
+            terminal.draw(|frame| self.draw(frame))?;
+            self.handle_events()?;
+
+            if let Some(rx) = &self.rx
+                && let Ok(event) = rx.try_recv()
+            {
+                match event {
+                    SpsaEvent::Iteration {
+                        params,
+                        k,
+                        wins,
+                        draws,
+                        losses,
+                        time,
+                    } => {
+                        if let Some(checkpoint) = &mut self.checkpoint {
+                            checkpoint.update(&params, k, wins, draws, losses, time);
+
+                            if k.is_multiple_of(self.save_iterations)
+                                || k == self.total_iterations.load(Ordering::Relaxed)
+                            {
+                                checkpoint.write().unwrap();
+                            }
+                        }
+                    }
+                    SpsaEvent::Error(e) => return Err(e),
+                }
+            }
+
+            if !self.exit
+                && !self.paused
+                && !self.running.load(Ordering::Relaxed)
+                && let Some(spsa) = &self.spsa
+            {
+                if let Some(checkpoint) = &self.checkpoint
+                    && let Ok(mut spsa) = spsa.lock()
+                {
+                    for p in &checkpoint.params {
+                        spsa.set_param_enabled(&p.name, p.tune);
+                    }
+                }
+
+                self.running.store(true, Ordering::Relaxed);
+
+                let spsa = spsa.clone();
+                let running = self.running.clone();
+
+                self.spsa_handle = Some(thread::spawn(move || {
+                    spsa.lock().unwrap().next();
+                    running.store(false, Ordering::Relaxed);
+                }));
+            }
+
+            if self.exit {
+                break Ok(());
+            }
+        }
+    }
+
+    fn draw(&mut self, frame: &mut Frame) {
         let current_k = self.checkpoint.as_ref().map_or(0, |c| c.current_iteration);
         let wins = self.checkpoint.as_ref().map_or(0, |c| c.wins);
         let draws = self.checkpoint.as_ref().map_or(0, |c| c.draws);
@@ -66,7 +163,7 @@ impl Widget for &App {
         let [left, right] = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(80), Constraint::Percentage(20)])
-            .areas(area);
+            .areas(frame.area());
 
         let [left_top, left_bottom] = Layout::default()
             .direction(Direction::Vertical)
@@ -144,7 +241,7 @@ impl Widget for &App {
             .y_axis(y_axis)
             .legend_position(None)
             .block(Block::new().borders(Borders::ALL))
-            .render(left_top, buf);
+            .render(left_top, frame.buffer_mut());
 
         let header = Row::new([
             "Name", "Value", "SD100", "SD500", "SDALL", "Delta", "C_K", "A_K", "Tune",
@@ -179,17 +276,12 @@ impl Widget for &App {
         }
 
         let mut rows = Vec::new();
-        for (row_idx, p) in param_list.iter().enumerate() {
+        for p in param_list.iter() {
             let average = p.values.iter().sum::<f64>() / p.values.len() as f64;
-            let name = if self.mode == Mode::ParamSelect && row_idx == self.selected_param_idx {
-                format!("> {}", p.name)
-            } else {
-                p.name.clone()
-            };
 
             let total_iterations = self.total_iterations.load(Ordering::Relaxed);
             rows.push(Row::new([
-                name,
+                p.name.clone(),
                 format!("{:.3}", p.values.last().unwrap()),
                 format!("{:.3}", standard_deviation!(p.values, average, 100)),
                 format!("{:.3}", standard_deviation!(p.values, average, 500)),
@@ -206,14 +298,21 @@ impl Widget for &App {
             Mode::ParamSelect => " Parameters [select] ",
         };
 
-        Table::new(rows, widths)
+        if self.mode == Mode::ParamSelect {
+            self.table_state.select(Some(self.selected_param_idx));
+        } else {
+            self.table_state.select(None);
+        }
+
+        let table = Table::new(rows, widths)
             .header(header)
+            .row_highlight_style(Style::new().reversed())
             .block(
                 Block::new()
                     .borders(Borders::ALL)
                     .title_top(Line::from(title).left_aligned()),
-            )
-            .render(left_bottom, buf);
+            );
+        frame.render_stateful_widget(table, left_bottom, &mut self.table_state);
 
         let params_str = param_list
             .iter()
@@ -246,7 +345,7 @@ impl Widget for &App {
                     .borders(Borders::ALL)
                     .title(Line::from(format!(" Iteration {} ", current_k)).centered()),
             )
-            .render(right_bottom, buf);
+            .render(right_bottom, frame.buffer_mut());
 
         let etc = (self.total_iterations.load(Ordering::Relaxed) - current_k) * time_iter / 1000;
 
@@ -268,105 +367,7 @@ impl Widget for &App {
                     .borders(Borders::ALL)
                     .title(Line::from(" Settings ").centered()),
             )
-            .render(right_top, buf);
-    }
-}
-
-impl Default for App {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl App {
-    pub fn new() -> App {
-        App {
-            engine: "./ferrischess".into(),
-            total_iterations: Arc::new(AtomicUsize::new(2000)),
-            save_iterations: 10,
-            book: "../8moves_v3.pgn".into(),
-            games_per_iter: 16,
-            concurrency: 8,
-            tc: "10+0.1".into(),
-
-            spsa: None,
-            spsa_handle: None,
-            rx: None,
-
-            checkpoint: None,
-
-            running: Arc::new(AtomicBool::new(false)),
-            paused: true,
-            exit: false,
-
-            mode: Mode::Normal,
-            selected_param_idx: 0,
-        }
-    }
-
-    pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<(), Box<dyn Error>> {
-        loop {
-            terminal.draw(|frame| self.draw(frame))?;
-            self.handle_events()?;
-
-            if let Some(rx) = &self.rx
-                && let Ok(event) = rx.try_recv()
-            {
-                match event {
-                    SpsaEvent::Iteration {
-                        params,
-                        k,
-                        wins,
-                        draws,
-                        losses,
-                        time,
-                    } => {
-                        if let Some(checkpoint) = &mut self.checkpoint {
-                            checkpoint.update(&params, k, wins, draws, losses, time);
-
-                            if k.is_multiple_of(self.save_iterations)
-                                || k == self.total_iterations.load(Ordering::Relaxed)
-                            {
-                                checkpoint.write().unwrap();
-                            }
-                        }
-                    }
-                    SpsaEvent::Error(e) => return Err(e),
-                }
-            }
-
-            if !self.exit
-                && !self.paused
-                && !self.running.load(Ordering::Relaxed)
-                && let Some(spsa) = &self.spsa
-            {
-                if let Some(checkpoint) = &self.checkpoint
-                    && let Ok(mut spsa) = spsa.lock()
-                {
-                    for p in &checkpoint.params {
-                        spsa.set_param_enabled(&p.name, p.tune);
-                    }
-                }
-
-                self.running.store(true, Ordering::Relaxed);
-
-                let spsa = spsa.clone();
-                let running = self.running.clone();
-
-                self.spsa_handle = Some(thread::spawn(move || {
-                    spsa.lock().unwrap().next();
-                    running.store(false, Ordering::Relaxed);
-                }));
-            }
-
-            if self.exit {
-                break Ok(());
-            }
-        }
-    }
-
-    fn draw(&self, frame: &mut Frame) {
-        frame.render_widget(self, frame.area());
+            .render(right_top, frame.buffer_mut());
     }
 
     fn handle_events(&mut self) -> Result<(), Box<dyn Error>> {
@@ -396,7 +397,6 @@ impl App {
             KeyCode::Char('r') => self.resume_from_checkpoint(),
             KeyCode::Tab => {
                 self.mode = Mode::ParamSelect;
-                self.selected_param_idx = 0;
             }
             KeyCode::Enter => {
                 let params = match build_param_set(&self.engine) {
