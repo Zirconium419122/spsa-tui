@@ -6,19 +6,21 @@ use std::{
         mpsc::Receiver,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use ratatui::{
     DefaultTerminal, Frame,
-    crossterm::event::{self, Event, KeyCode, KeyEventKind},
+    crossterm::{
+        event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+        execute,
+    },
     layout::{Constraint, Direction, Layout},
     style::Style,
     symbols::Marker,
     text::Line,
     widgets::{
-        Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph, Row, Table,
-        TableState, Widget,
+        Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph, Row, Table, TableState, Widget,
     },
 };
 
@@ -55,6 +57,7 @@ pub struct App {
     table_state: TableState,
 
     running: Arc<AtomicBool>,
+    run_timer: Option<Instant>,
     paused: bool,
     exit: bool,
 }
@@ -83,6 +86,7 @@ impl App {
             checkpoint: None,
 
             running: Arc::new(AtomicBool::new(false)),
+            run_timer: None,
             paused: true,
             exit: false,
 
@@ -93,6 +97,8 @@ impl App {
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<(), Box<dyn Error>> {
+        execute!(std::io::stdout(), EnableMouseCapture)?;
+
         loop {
             terminal.draw(|frame| self.draw(frame))?;
             self.handle_events()?;
@@ -123,6 +129,10 @@ impl App {
                 }
             }
 
+            if !self.running.load(Ordering::Relaxed) {
+                self.run_timer = None;
+            }
+
             if !self.exit
                 && !self.paused
                 && !self.running.load(Ordering::Relaxed)
@@ -137,6 +147,7 @@ impl App {
                 }
 
                 self.running.store(true, Ordering::Relaxed);
+                self.run_timer = Some(Instant::now());
 
                 let spsa = spsa.clone();
                 let running = self.running.clone();
@@ -347,7 +358,8 @@ impl App {
             )
             .render(right_bottom, frame.buffer_mut());
 
-        let etc = (self.total_iterations.load(Ordering::Relaxed) - current_k) * time_iter / 1000;
+        let etc = ((self.total_iterations.load(Ordering::Relaxed).saturating_sub(current_k)) * time_iter / 1000)
+            .saturating_sub(self.run_timer.map_or(0, |x| x.elapsed().as_secs() as usize));
 
         let settings = [
             format!("Engine           : {}", self.engine),
@@ -393,7 +405,12 @@ impl App {
     fn handle_normal_key(&mut self, key_event: event::KeyEvent) {
         match key_event.code {
             KeyCode::Char('q') => self.exit(),
-            KeyCode::Char(' ') => self.paused = !self.paused,
+            KeyCode::Char(' ') => {
+                self.paused = !self.paused;
+                if self.paused {
+                    self.run_timer = None;
+                }
+            }
             KeyCode::Char('r') => self.resume_from_checkpoint(),
             KeyCode::Tab => {
                 self.mode = Mode::ParamSelect;
@@ -452,15 +469,16 @@ impl App {
         match key_event.code {
             KeyCode::Char('q') => self.exit(),
             KeyCode::Tab | KeyCode::Esc => self.mode = Mode::Normal,
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 if let Some(checkpoint) = &self.checkpoint
                     && !checkpoint.params.is_empty()
                 {
-                    self.selected_param_idx = (self.selected_param_idx + checkpoint.params.len() - 1)
+                    self.selected_param_idx = (self.selected_param_idx + checkpoint.params.len()
+                        - 1)
                         % checkpoint.params.len();
                 }
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 if let Some(checkpoint) = &self.checkpoint
                     && !checkpoint.params.is_empty()
                 {
@@ -511,6 +529,8 @@ impl App {
     fn exit(&mut self) {
         self.running.store(false, Ordering::Relaxed);
         self.exit = true;
+
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
 
         if let Some(spsa_handle) = self.spsa_handle.take() {
             let _ = spsa_handle.join();
