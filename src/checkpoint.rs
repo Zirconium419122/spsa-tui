@@ -14,6 +14,8 @@ pub struct ParamHist {
     pub r_end: f64,
     pub values: Vec<f64>,
     pub tune: bool,
+    #[serde(skip)]
+    pub show: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +56,7 @@ impl Checkpoint {
                 r_end: p.r_end,
                 values: vec![p.value],
                 tune: p.tune,
+                show: true,
             })
             .collect::<Vec<_>>();
         param_hist.sort_by_key(|p| p.name.clone());
@@ -115,7 +118,9 @@ impl Checkpoint {
 
     pub fn load() -> Result<Checkpoint, Box<dyn Error>> {
         let file = std::fs::read("checkpoint.json")?;
-        Ok(serde_json::from_slice(&file)?)
+        let mut checkpoint: Checkpoint = serde_json::from_slice(&file)?;
+        checkpoint.params.iter_mut().for_each(|p| p.show = p.tune);
+        Ok(checkpoint)
     }
 
     pub fn latest_params(&self) -> ParamSet {

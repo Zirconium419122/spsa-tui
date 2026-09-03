@@ -194,6 +194,7 @@ impl App {
 
         let data: Vec<(String, Vec<(f64, f64)>)> = param_list
             .iter()
+            .filter(|p| p.show)
             .map(|p| {
                 (
                     p.name.clone(),
@@ -255,7 +256,7 @@ impl App {
             .render(left_top, frame.buffer_mut());
 
         let header = Row::new([
-            "Name", "Value", "SD100", "SD500", "SDALL", "Delta", "C_K", "A_K", "Tune",
+            "Name", "Value", "SD100", "SD500", "SDALL", "Delta", "C_K", "A_K", "Tune", "Show",
         ])
         .style(Style::new().bold())
         .bottom_margin(1);
@@ -269,7 +270,8 @@ impl App {
             Constraint::Percentage(10),
             Constraint::Percentage(10),
             Constraint::Percentage(10),
-            Constraint::Percentage(10),
+            Constraint::Percentage(5),
+            Constraint::Percentage(5),
         ];
 
         macro_rules! standard_deviation {
@@ -301,6 +303,7 @@ impl App {
                 format!("{:.3}", c_k(p.c_end, current_k, total_iterations)),
                 format!("{:.3}", a_k(p.r_end, p.c_end, current_k, total_iterations)),
                 if p.tune { "✓".into() } else { "✗".into() },
+                if p.show { "✓".into() } else { "✗".into() },
             ]));
         }
 
@@ -491,6 +494,13 @@ impl App {
                     && let Some(p) = checkpoint.params.get_mut(self.selected_param_idx)
                 {
                     p.tune = !p.tune;
+                }
+            }
+            KeyCode::Char('h') => {
+                if let Some(checkpoint) = &mut self.checkpoint
+                    && let Some(p) = checkpoint.params.get_mut(self.selected_param_idx)
+                {
+                    p.show = !p.show;
                 }
             }
             _ => {}
