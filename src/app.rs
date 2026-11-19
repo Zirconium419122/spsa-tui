@@ -166,6 +166,7 @@ impl App {
 
     fn draw(&mut self, frame: &mut Frame) {
         let current_k = self.checkpoint.as_ref().map_or(0, |c| c.current_iteration);
+        let total_iterations = self.total_iterations.load(Ordering::Relaxed);
         let wins = self.checkpoint.as_ref().map_or(0, |c| c.wins);
         let draws = self.checkpoint.as_ref().map_or(0, |c| c.draws);
         let losses = self.checkpoint.as_ref().map_or(0, |c| c.losses);
@@ -275,30 +276,28 @@ impl App {
         ];
 
         macro_rules! standard_deviation {
-            ($values:expr, $average:expr, $n:expr) => {{
+            ($values:expr, $n:expr) => {{
                 let values = $values.get($values.len().saturating_sub($n)..).unwrap();
+                let average = values.iter().sum::<f64>() / values.len() as f64;
                 let s_sq = values
                     .iter()
-                    .fold(0.0, |acc, x| acc + (x - $average).powi(2))
+                    .fold(0.0, |acc, x| acc + (x - average).powi(2))
                     / (values.len() - 1) as f64;
                 s_sq.sqrt()
             }};
-            ($values:expr, $average:expr) => {
-                standard_deviation!($values, $average, $values.len())
+            ($values:expr) => {
+                standard_deviation!($values, $values.len())
             };
         }
 
         let mut rows = Vec::new();
         for p in param_list.iter() {
-            let average = p.values.iter().sum::<f64>() / p.values.len() as f64;
-
-            let total_iterations = self.total_iterations.load(Ordering::Relaxed);
             rows.push(Row::new([
                 p.name.clone(),
                 format!("{:.3}", p.values.last().unwrap()),
-                format!("{:.3}", standard_deviation!(p.values, average, 100)),
-                format!("{:.3}", standard_deviation!(p.values, average, 500)),
-                format!("{:.3}", standard_deviation!(p.values, average)),
+                format!("{:.3}", standard_deviation!(p.values, 100)),
+                format!("{:.3}", standard_deviation!(p.values, 500)),
+                format!("{:.3}", standard_deviation!(p.values)),
                 format!("{:.3}", p.values.last().unwrap() - p.values[0]),
                 format!("{:.3}", c_k(p.c_end, current_k, total_iterations)),
                 format!("{:.3}", a_k(p.r_end, p.c_end, current_k, total_iterations)),
@@ -361,13 +360,13 @@ impl App {
             )
             .render(right_bottom, frame.buffer_mut());
 
-        let etc = ((self.total_iterations.load(Ordering::Relaxed).saturating_sub(current_k)) * time_iter / 1000)
+        let etc = ((total_iterations.saturating_sub(current_k)) * time_iter / 1000)
             .saturating_sub(self.run_timer.map_or(0, |x| x.elapsed().as_secs() as usize));
 
         let settings = [
             format!("Engine           : {}", self.engine),
             format!("Book             : {}", self.book),
-            format!("Total iterations : {}", self.total_iterations.load(Ordering::Relaxed)),
+            format!("Total iterations : {}", total_iterations),
             format!("Games per iter   : {}", self.games_per_iter),
             format!("Concurrency      : {}", self.concurrency),
             format!("Time control     : {}", self.tc),
@@ -424,12 +423,12 @@ impl App {
                     Err(_) => return,
                 };
 
-                let total_iter = self.total_iterations.load(Ordering::Relaxed);
+                let total_iterations = self.total_iterations.load(Ordering::Relaxed);
                 self.checkpoint = Some(Checkpoint::new(
                     self.engine.clone(),
                     self.book.clone(),
                     self.tc.clone(),
-                    total_iter,
+                    total_iterations,
                     &params,
                 ));
                 self.selected_param_idx = 0;
@@ -456,12 +455,20 @@ impl App {
                 self.paused = false;
             }
             KeyCode::Up => {
-                self.total_iterations.fetch_add(100, Ordering::Relaxed);
+                let previous = self.total_iterations.fetch_add(100, Ordering::Relaxed);
+
+                if let Some(checkpoint) = &mut self.checkpoint {
+                    checkpoint.total_iterations = previous + 100;
+                }
             }
             KeyCode::Down => {
                 let previous = self.total_iterations.fetch_sub(100, Ordering::Relaxed);
                 if previous <= 100 {
                     self.total_iterations.store(1, Ordering::Relaxed);
+                }
+
+                if let Some(checkpoint) = &mut self.checkpoint {
+                    checkpoint.total_iterations = if previous <= 100 { 1 } else { previous - 100 };
                 }
             }
             _ => {}
@@ -514,6 +521,7 @@ impl App {
 
         let start_k = checkpoint.current_iteration + 1;
         self.checkpoint = Some(checkpoint.clone());
+        self.total_iterations.store(checkpoint.total_iterations, Ordering::Relaxed);
         self.selected_param_idx = 0;
 
         let config = SpsaConfig {
